@@ -1,0 +1,67 @@
+version: "3.8"
+
+services:
+  # Dedicated Application PostgreSQL Database
+  # NOTE: Strictly for portal users, sessions, RBAC, and metadata.
+  # Do NOT point to or mix with the bank_dwh_real database.
+  app-db:
+    image: postgres:16-alpine
+    container_name: banking_portal_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: banking_portal_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - portal_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d banking_portal_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI Backend Service
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: banking_portal_backend
+    restart: unless-stopped
+    depends_on:
+      app-db:
+        condition: service_healthy
+    environment:
+      APP_NAME: "Banking Analytics Portal"
+      APP_ENV: "development"
+      DEBUG: "true"
+      DATABASE_URL: "postgresql+asyncpg://postgres:postgres_dev_password@app-db:5432/banking_portal_db"
+      FRONTEND_URL: "http://localhost:3000"
+      ALLOWED_ORIGINS: '["http://localhost:3000", "http://127.0.0.1:3000"]'
+      SECRET_KEY: "change-this-in-production-long-random-secret-key-32c"
+      CSRF_SECRET_KEY: "change-this-in-production-csrf-secret-key-32c"
+      # Superset service connection (configure with your live instance)
+      SUPERSET_BASE_URL: "http://host.docker.internal:8088"
+      SUPERSET_ADMIN_USERNAME: "admin"
+      SUPERSET_ADMIN_PASSWORD: "admin_password_placeholder"
+    ports:
+      - "8000:8000"
+
+  # Next.js Frontend Service
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: banking_portal_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_URL: "http://localhost:8000"
+    ports:
+      - "3000:3000"
+
+volumes:
+  portal_pgdata:
+    driver: local
