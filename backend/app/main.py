@@ -1,13 +1,13 @@
 import logging
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
-from fastapi import FastAPI, Request, status
+from typing import AsyncGenerator, Optional
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.v1.router import api_router
 from app.core.config import settings
-from app.core.database import Base, engine, async_session_factory
+from app.core.database import engine, async_session_factory
 from app.core.exceptions import PortalException
 from app.core.security import hash_password
 from app.models.role import Role
@@ -20,13 +20,47 @@ logging.basicConfig(
 )
 logger = logging.getLogger("banking_portal")
 
+INSECURE_PASSWORDS = {
+    "admin",
+    "password",
+    "admin123",
+    "password123",
+    "adminbanking123!",
+    "changethispassword123!",
+    "changethis",
+    "placeholder",
+    "admin_password_placeholder",
+    "changeme",
+    "12345678",
+    "qwerty1234",
+    "secret",
+}
+
+
+def validate_initial_admin_credentials(email: Optional[str], password: Optional[str]) -> None:
+    """Validate that initial administrator credentials are explicitly provided and secure."""
+    if not email or not email.strip():
+        raise ValueError(
+            "FIRST_SUPERUSER_EMAIL is required for initial portal administrator setup."
+        )
+    if not password or len(password.strip()) < 8:
+        raise ValueError(
+            "FIRST_SUPERUSER_PASSWORD is required and must be at least 8 characters."
+        )
+    cleaned_pwd = password.strip().lower()
+    if cleaned_pwd in INSECURE_PASSWORDS or "placeholder" in cleaned_pwd:
+        raise ValueError(
+            "FIRST_SUPERUSER_PASSWORD cannot be a known default or placeholder. "
+            "Please configure a strong, unique administrator password in the environment."
+        )
+
 
 async def init_default_data() -> None:
-    """Seed base roles, placeholder dashboards, and initial superuser if not present."""
+    """Seed base roles, administrator, and dashboard metadata idempotently."""
     async with async_session_factory() as session:
         from sqlalchemy import select
 
-        # Seed standard banking roles
+        # 1. Seed standard banking roles idempotently
         roles_data = [
             ("admin", "Full system administrator"),
             ("executive", "Executive leadership with portfolio overview"),
@@ -44,26 +78,47 @@ async def init_default_data() -> None:
                 session.add(r)
                 await session.flush()
                 created_roles[role_name] = r
+                logger.info(f"Seeded role: {role_name}")
             else:
                 created_roles[role_name] = existing
 
-        # Seed initial superuser
-        stmt = select(User).where(User.email == settings.FIRST_SUPERUSER_EMAIL.lower())
+        # 2. Seed initial administrator idempotently
+        stmt = select(User).where(User.is_superuser == True)
         res = await session.execute(stmt)
-        superuser = res.scalars().first()
-        if not superuser:
-            admin_user = User(
-                email=settings.FIRST_SUPERUSER_EMAIL.lower(),
-                hashed_password=hash_password(settings.FIRST_SUPERUSER_PASSWORD),
-                full_name=settings.FIRST_SUPERUSER_FULL_NAME,
-                is_active=True,
-                is_superuser=True,
-                roles=[created_roles["admin"]] if "admin" in created_roles else [],
-            )
-            session.add(admin_user)
-            logger.info(f"Initialized superuser: {settings.FIRST_SUPERUSER_EMAIL}")
+        existing_superuser = res.scalars().first()
 
-        # Seed representative dashboard placeholders (ready for Superset UUID mapping)
+        if existing_superuser:
+            logger.info(
+                f"Superuser already exists ({existing_superuser.email}); "
+                "preserving existing administrator credentials without modification."
+            )
+        else:
+            # Require explicit, secure administrator credentials when initializing
+            validate_initial_admin_credentials(
+                settings.FIRST_SUPERUSER_EMAIL, settings.FIRST_SUPERUSER_PASSWORD
+            )
+
+            stmt = select(User).where(User.email == settings.FIRST_SUPERUSER_EMAIL.lower().strip())
+            res = await session.execute(stmt)
+            user_by_email = res.scalars().first()
+
+            if user_by_email:
+                logger.info(
+                    f"User {user_by_email.email} already exists; preserving existing password."
+                )
+            else:
+                admin_user = User(
+                    email=settings.FIRST_SUPERUSER_EMAIL.lower().strip(),
+                    hashed_password=hash_password(settings.FIRST_SUPERUSER_PASSWORD),
+                    full_name=settings.FIRST_SUPERUSER_FULL_NAME,
+                    is_active=True,
+                    is_superuser=True,
+                    roles=[created_roles["admin"]] if "admin" in created_roles else [],
+                )
+                session.add(admin_user)
+                logger.info(f"Initialized new superuser: {admin_user.email}")
+
+        # 3. Seed representative dashboard placeholders idempotently
         dashboards_data = [
             {
                 "slug": "executive-summary",
@@ -99,7 +154,7 @@ async def init_default_data() -> None:
                 "category": "Operations",
                 "superset_dashboard_id": "placeholder-uuid-branch-operations",
                 "roles": ["admin", "branch_manager"],
-                "requires_branch_scope": True,  # Architecture ready for branch RLS
+                "requires_branch_scope": True,
             },
         ]
 
@@ -128,15 +183,14 @@ async def init_default_data() -> None:
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application startup and shutdown lifespan handler."""
     logger.info("Starting Banking Analytics Portal backend...")
-    # Create tables if not present (in production Alembic is preferred)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # NOTE: Schema management is strictly handled via Alembic migrations.
+    # Base.metadata.create_all is intentionally removed.
 
-    # Seed default roles and admin
     try:
         await init_default_data()
     except Exception as e:
-        logger.warning(f"Default data seeding notice: {e}")
+        logger.critical(f"FATAL: Application initialization failed: {e}", exc_info=True)
+        raise e
 
     yield
 

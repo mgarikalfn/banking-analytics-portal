@@ -9,15 +9,16 @@ services:
     container_name: banking_portal_db
     restart: unless-stopped
     environment:
-      POSTGRES_DB: banking_portal_db
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres_dev_password
+      POSTGRES_DB: ${POSTGRES_DB:-banking_portal_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be configured in environment}
     ports:
-      - "5432:5432"
+      # Maps container port 5432 to host port 5433 to avoid conflict with existing local PostgreSQL
+      - "${PORTAL_DB_PORT:-5433}:5432"
     volumes:
       - portal_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d banking_portal_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-banking_portal_db}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -33,18 +34,22 @@ services:
       app-db:
         condition: service_healthy
     environment:
-      APP_NAME: "Banking Analytics Portal"
-      APP_ENV: "development"
-      DEBUG: "true"
-      DATABASE_URL: "postgresql+asyncpg://postgres:postgres_dev_password@app-db:5432/banking_portal_db"
-      FRONTEND_URL: "http://localhost:3000"
-      ALLOWED_ORIGINS: '["http://localhost:3000", "http://127.0.0.1:3000"]'
-      SECRET_KEY: "change-this-in-production-long-random-secret-key-32c"
-      CSRF_SECRET_KEY: "change-this-in-production-csrf-secret-key-32c"
-      # Superset service connection (configure with your live instance)
-      SUPERSET_BASE_URL: "http://host.docker.internal:8088"
-      SUPERSET_ADMIN_USERNAME: "admin"
-      SUPERSET_ADMIN_PASSWORD: "admin_password_placeholder"
+      APP_NAME: "${APP_NAME:-Banking Analytics Portal}"
+      APP_ENV: "${APP_ENV:-development}"
+      DEBUG: "${DEBUG:-true}"
+      # Internal Docker network connection using service hostname 'app-db' and port 5432
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@app-db:5432/${POSTGRES_DB:-banking_portal_db}"
+      FRONTEND_URL: "${FRONTEND_URL:-http://localhost:3000}"
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-[\"http://localhost:3000\",\"http://127.0.0.1:3000\"]}"
+      SECRET_KEY: "${SECRET_KEY:?SECRET_KEY must be configured in environment}"
+      CSRF_SECRET_KEY: "${CSRF_SECRET_KEY:?CSRF_SECRET_KEY must be configured in environment}"
+      FIRST_SUPERUSER_EMAIL: "${FIRST_SUPERUSER_EMAIL:?FIRST_SUPERUSER_EMAIL must be configured in environment}"
+      FIRST_SUPERUSER_PASSWORD: "${FIRST_SUPERUSER_PASSWORD:?FIRST_SUPERUSER_PASSWORD must be configured in environment}"
+      FIRST_SUPERUSER_FULL_NAME: "${FIRST_SUPERUSER_FULL_NAME:-System Administrator}"
+      # Superset integration (optional until configured with real credentials)
+      SUPERSET_BASE_URL: "${SUPERSET_BASE_URL:-http://host.docker.internal:8088}"
+      SUPERSET_ADMIN_USERNAME: "${SUPERSET_ADMIN_USERNAME:-}"
+      SUPERSET_ADMIN_PASSWORD: "${SUPERSET_ADMIN_PASSWORD:-}"
     ports:
       - "8000:8000"
 
@@ -58,7 +63,7 @@ services:
     depends_on:
       - backend
     environment:
-      NEXT_PUBLIC_API_URL: "http://localhost:8000"
+      NEXT_PUBLIC_API_URL: "${NEXT_PUBLIC_API_URL:-http://localhost:8000}"
     ports:
       - "3000:3000"
 

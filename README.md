@@ -27,18 +27,21 @@ Enterprise Banking Analytics Portal featuring a **Next.js (App Router) + TypeScr
 ┌───────┴───────────────┐  ┌──────────────────────────┴──────────────────┐
 │ Dedicated Postgres DB │  │        Apache Superset (Port 8088)          │
 │ (banking_portal_db)   │  │  - Isolated Analytical DWH Read Connection  │
-│ Users, Roles, Audits  │  │  - Row-Level Security Ready                 │
+│ Host Port: 5433       │  │  - Row-Level Security Ready                 │
+│ Container Port: 5432  │  │                                             │
 └───────────────────────┘  └─────────────────────────────────────────────┘
 ```
 
-### Key Security Safeguards
-1. **HTTP-Only Session Cookies**: Authentication tokens are stored strictly in `HttpOnly`, `SameSite=Lax` cookies to prevent client-side script theft (XSS).
-2. **Double-Submit CSRF Protection**: State-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`) require an `X-CSRF-Token` header matching the readable CSRF cookie.
-3. **Argon2id Password Hashing**: Passwords hashed with state-of-the-art Argon2id via `pwdlib`.
-4. **Backend-Enforced Dashboard Permissions**: Access is verified on the backend before any Superset guest token is requested.
-5. **Zero Credential Exposure**: Superset admin service credentials never touch the browser.
-6. **Data Warehouse Isolation**: The portal maintains its own dedicated application database (`banking_portal_db`). The live data warehouse (`bank_dwh_real`) is never written to or modified by the portal application.
-7. **Branch-Level RLS Ready**: Architecture includes placeholder hooks for verified branch-level Row-Level Security once production branch mappings and warehouse schema are confirmed.
+### Key Security & Operational Principles
+1. **Schema Management via Alembic**: `Base.metadata.create_all()` is removed from startup. All table creation, constraints, and indexes are managed exclusively through tracked Alembic migrations (`alembic upgrade head`).
+2. **Dedicated Application Database**: The portal uses its own database (`banking_portal_db`). It **never** connects to or modifies the live data warehouse (`bank_dwh_real`).
+3. **Host Port 5433 Mapping**: In Docker Compose, the PostgreSQL container port `5432` maps to host port `5433` to prevent port collisions with any local PostgreSQL instance running on port `5432`.
+4. **No Insecure Admin Fallbacks**: Fresh database initialization requires explicit `FIRST_SUPERUSER_EMAIL` and `FIRST_SUPERUSER_PASSWORD`. Known placeholders and default passwords are automatically rejected.
+5. **Idempotent Data Seeding**: Subsequent backend restarts preserve existing administrator credentials and user modifications without overwriting passwords.
+6. **HTTP-Only Session Cookies**: Authentication tokens are stored strictly in `HttpOnly`, `SameSite=Lax` cookies.
+7. **Double-Submit CSRF Protection**: State-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`) require an `X-CSRF-Token` header.
+8. **Argon2id Password Hashing**: Passwords are saved with Argon2id using `pwdlib`.
+9. **Optional Superset Configuration**: The Superset integration is inactive by default and does not attempt invalid network calls or report fake success until real service credentials are provided.
 
 ---
 
@@ -46,159 +49,154 @@ Enterprise Banking Analytics Portal featuring a **Next.js (App Router) + TypeScr
 
 ```
 banking-analytics-portal/
+├── .env.example                    # Root environment template for Docker Compose
+├── .gitignore                      # Git ignore rules (.env, .venv, node_modules, .next)
+├── docker-compose.yml              # PostgreSQL (port 5433), Backend (port 8000), Frontend (port 3000)
+├── README.md
 ├── backend/
-│   ├── .venv/                      # Python 3.13 virtual environment
+│   ├── .env.example                # Backend environment template
+│   ├── alembic.ini                 # Alembic migration configuration
+│   ├── alembic/
+│   │   ├── env.py                  # Async migration runner
+│   │   └── versions/
+│   │       └── 386fe2a53b3e_initial_schema.py # Initial schema revision
 │   ├── app/
 │   │   ├── api/                    # API routes & dependency injection
 │   │   │   ├── deps.py             # Auth, RBAC & CSRF dependencies
-│   │   │   └── v1/
-│   │   │       ├── endpoints/      # auth, dashboards, superset, users, roles, health
-│   │   │       └── router.py       # V1 router aggregation
+│   │   │   └── v1/                 # Endpoints: auth, dashboards, superset, users, roles, health
 │   │   ├── core/                   # config, database, security, exceptions
-│   │   ├── models/                 # SQLAlchemy 2.x async models (User, Role, Dashboard, AuditLog)
+│   │   ├── models/                 # SQLAlchemy 2.x models: User, Role, Dashboard, AuditLog
+│   │   ├── repositories/           # Async repository data access layer
 │   │   ├── schemas/                # Pydantic v2 DTO schemas
-│   │   ├── repositories/           # Async repository pattern
 │   │   ├── services/               # AuthService, UserService, DashboardService, SupersetService
-│   │   └── main.py                 # FastAPI application & startup seed
-│   ├── alembic/                    # Database migration configuration
-│   ├── tests/                      # Pytest suite (auth, csrf, rbac, dashboards, superset)
-│   ├── .env.example                # Backend configuration template
+│   │   └── main.py                 # FastAPI application, startup lifespan & idempotent seed
+│   ├── tests/                      # Pytest suite (22 automated tests)
 │   ├── Dockerfile
 │   └── requirements.txt
-├── frontend/
-│   ├── src/
-│   │   ├── app/                    # App Router pages (/login, /dashboard, /dashboard/[id], /admin)
-│   │   ├── components/             # Navbar, Sidebar, SupersetDashboard, DashboardCard, Guards
-│   │   ├── hooks/                  # useAuth, useDashboards, useSupersetGuestToken
-│   │   ├── lib/                    # api.ts (credentials & CSRF), csrf.ts, authContext.tsx
-│   │   └── types/                  # TypeScript interfaces
-│   ├── public/
-│   ├── .env.example
-│   ├── Dockerfile
-│   ├── package.json
-│   └── tsconfig.json
-├── docker-compose.yml              # PostgreSQL, Backend, and Frontend orchestration
-└── README.md
+└── frontend/
+    ├── .env.example
+    ├── package.json
+    ├── Dockerfile
+    └── src/
+        ├── app/                    # App Router pages (/login, /dashboard, /dashboard/[id], /admin)
+        ├── components/             # SupersetDashboard, Navbar, Sidebar, DashboardCard, Guards
+        ├── hooks/                  # useAuth, useDashboards, useSupersetGuestToken
+        └── lib/                    # api.ts (cookie credentials & CSRF header), authContext.tsx
 ```
 
 ---
 
-## Windows Setup & Execution Guide
+## Execution Guide
 
-### Prerequisites
-- Python 3.13 (already configured under `backend/.venv`)
-- Node.js 20+ (Node.js 24 installed in `C:\Program Files\nodejs`)
-- PostgreSQL 16+ or Docker Desktop
+### Option 1: Running with Docker Compose (Recommended)
+
+#### Step 1: Create `.env` from template
+In the project root, copy the environment template:
+```powershell
+Copy-Item .env.example .env
+```
+
+Open `.env` and configure your secure credentials:
+```ini
+POSTGRES_PASSWORD=YourStrongDatabasePassword123!
+SECRET_KEY=at_least_32_characters_random_hex_string_here
+CSRF_SECRET_KEY=at_least_32_characters_random_csrf_secret_here
+
+FIRST_SUPERUSER_EMAIL=admin@bankportal.internal
+FIRST_SUPERUSER_PASSWORD=YourStrongAdminPassword123!
+```
+
+#### Step 2: Build and start the services
+```powershell
+docker compose up --build -d
+```
+
+#### Step 3: Run database migrations
+Run the initial Alembic migration inside the backend container against `banking_portal_db`:
+```powershell
+docker compose exec backend alembic upgrade head
+```
+
+#### Step 4: Access the portal
+- **Frontend Portal**: `http://localhost:3000`
+- **FastAPI Documentation**: `http://localhost:8000/docs`
+- **Application Database**: Accessible on host port `5433` (service internal: `app-db:5432`)
 
 ---
 
-### Method A: Running Natively on Windows
+### Option 2: Running Natively on Windows (PowerShell)
 
-#### 1. Backend Setup
+#### Step 1: Database Setup
+Ensure a PostgreSQL database named `banking_portal_db` is running (e.g. via Docker Compose `docker compose up -d app-db` or a dedicated local server on port 5433).
 
-Open PowerShell in the project root:
-
+#### Step 2: Backend Setup
 ```powershell
 cd backend
 
-# Copy environment template
+# Create backend .env
 Copy-Item .env.example .env
 
-# Run automated tests to verify environment
+# Configure .env with your database URL and required initial administrator password:
+# DATABASE_URL=postgresql+asyncpg://postgres:your_password@localhost:5433/banking_portal_db
+# FIRST_SUPERUSER_EMAIL=admin@bankportal.internal
+# FIRST_SUPERUSER_PASSWORD=YourCustomStrongPassword123!
+
+# Apply Alembic database migrations
+.\.venv\Scripts\alembic.exe upgrade head
+
+# Run automated tests to verify schema and security constraints
 .\.venv\Scripts\pytest.exe -v
 
-# Start the FastAPI server
+# Start FastAPI development server
 .\.venv\Scripts\uvicorn.exe app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-The backend starts at `http://127.0.0.1:8000`.
-- Swagger API Docs: `http://127.0.0.1:8000/docs`
-- Health check: `http://127.0.0.1:8000/api/v1/health/`
-
-On first launch, the backend automatically seeds:
-- Base roles: `admin`, `executive`, `branch_manager`, `compliance_officer`, `financial_analyst`
-- Default superuser: `admin@bankportal.internal` / `AdminBanking123!`
-- Initial dashboard catalog entries with Superset UUID placeholders
-
-#### 2. Frontend Setup
-
-In a new PowerShell window:
-
+#### Step 3: Frontend Setup
+In a second PowerShell window:
 ```powershell
-# Ensure node is in PATH for this session if needed:
+# Prepend Node.js to PATH if required
 $env:Path = "C:\Program Files\nodejs;" + $env:Path
 
 cd frontend
-
-# Copy environment template
 Copy-Item .env.example .env.local
-
-# Run production build or development server
 npm run dev
 ```
-
-The frontend portal will be available at `http://localhost:3000`.
-
----
-
-### Method B: Running via Docker Compose
-
-```powershell
-# Start application database, backend, and frontend
-docker compose up --build -d
-
-# Check running containers
-docker compose ps
-
-# View logs
-docker compose logs -f backend
-```
+Open `http://localhost:3000` in your browser.
 
 ---
 
-## Pre-seeded Credentials for Testing
+## Initial Administrator Credentials
 
-| Role | Email | Password | Scope |
-| :--- | :--- | :--- | :--- |
-| **System Administrator** | `admin@bankportal.internal` | `AdminBanking123!` | Full admin, user & role management, all dashboards |
+When the database is migrated and the backend boots for the first time, `init_default_data()` seeds:
+1. Standard banking RBAC roles (`admin`, `executive`, `branch_manager`, `compliance_officer`, `financial_analyst`).
+2. An initial administrator using `FIRST_SUPERUSER_EMAIL` and `FIRST_SUPERUSER_PASSWORD` configured in your `.env`.
+3. Representative dashboard metadata with Superset UUID placeholders.
 
-*(Additional users with specific branch or risk roles can be registered directly from the `/admin` portal page).*
+> [!IMPORTANT]
+> The backend verifies that `FIRST_SUPERUSER_PASSWORD` is at least 8 characters and **not** a known default or placeholder.
+> If an administrator already exists in the database, subsequent startups preserve the existing password without overwriting it.
 
 ---
 
 ## Apache Superset Configuration Checklist
 
-To connect live Superset dashboards to the portal:
+When you are ready to connect a live Apache Superset instance:
 
-1. **Enable Feature Flags in Superset**:
-   In your Superset `superset_config.py`, enable embedding and guest role access:
+1. **Enable Feature Flags in Superset** (`superset_config.py`):
    ```python
    FEATURE_FLAGS = {
        "EMBEDDED_SUPERSET": True,
    }
    GUEST_ROLE_NAME = "Public"
-   GUEST_TOKEN_JWT_SECRET = "your-superset-guest-token-secret"
-   GUEST_TOKEN_JWT_ALGO = "HS256"
    SUPERSET_WEBSERVER_DOMAINS = ["http://localhost:3000"]
    ```
 
-2. **Configure Backend Credentials**:
-   In `backend/.env`:
+2. **Set Credentials in `.env`**:
    ```ini
    SUPERSET_BASE_URL="http://localhost:8088"
-   SUPERSET_ADMIN_USERNAME="admin"
-   SUPERSET_ADMIN_PASSWORD="your-real-superset-admin-password"
+   SUPERSET_ADMIN_USERNAME="your-superset-admin"
+   SUPERSET_ADMIN_PASSWORD="your-superset-password"
    ```
 
-3. **Enable Embedded Access in Superset UI**:
-   - Open your dashboard in Apache Superset.
-   - Click the **...** menu in the top right -> **Embed dashboard**.
-   - Copy the generated **Embedded UUID**.
-   - Update the corresponding dashboard in the portal (via database or admin endpoint) with the matching `superset_dashboard_id`.
-
----
-
-## Remaining Operational Considerations
-- **Production Secret Rotation**: Replace `SECRET_KEY` and `CSRF_SECRET_KEY` with cryptographically generated random strings (`openssl rand -hex 32`).
-- **HTTPS & Cookie Security**: Set `COOKIE_SECURE=true` in `backend/.env` once deploying behind HTTPS/TLS reverse proxy.
-- **Verified Branch Schema Mapping**: When branch-level datasets in the warehouse are finalized, link `assigned_branch_id` to the dataset filter clauses in `app/services/superset_service.py`.
+3. **Map Dashboard Embedded UUID**:
+   In Apache Superset, click **...** -> **Embed dashboard** -> copy the **Embedded UUID**. Update the corresponding dashboard's `superset_dashboard_id` via the portal Admin API.

@@ -11,6 +11,15 @@ from app.schemas.superset import SupersetGuestTokenResponse
 
 logger = logging.getLogger(__name__)
 
+KNOWN_INSECURE_OR_PLACEHOLDER_PASSWORDS = {
+    "admin_password_placeholder",
+    "placeholder",
+    "password",
+    "admin",
+    "changeme",
+    "your-superset-password",
+}
+
 
 class SupersetService:
     """Backend service for Apache Superset integration.
@@ -22,21 +31,42 @@ class SupersetService:
     _cached_admin_token: Optional[str] = None
     _token_fetched_at: Optional[datetime] = None
 
-    def __init__(self, base_url: Optional[str] = None):
-        self.base_url = (base_url or settings.SUPERSET_BASE_URL).rstrip("/")
-        self.admin_username = settings.SUPERSET_ADMIN_USERNAME
-        self.admin_password = settings.SUPERSET_ADMIN_PASSWORD
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        admin_username: Optional[str] = None,
+        admin_password: Optional[str] = None,
+    ):
+        self.base_url = (base_url or settings.SUPERSET_BASE_URL or "").rstrip("/")
+        self.admin_username = (
+            admin_username if admin_username is not None else settings.SUPERSET_ADMIN_USERNAME
+        )
+        self.admin_password = (
+            admin_password if admin_password is not None else settings.SUPERSET_ADMIN_PASSWORD
+        )
 
     def is_configured(self) -> bool:
-        """Check whether Superset has been configured with real non-placeholder credentials."""
-        if not self.base_url or not self.admin_username:
+        """Check whether Superset has been configured with real, non-placeholder credentials."""
+        if not self.base_url or not self.admin_username or not self.admin_password:
             return False
-        if "placeholder" in self.admin_password.lower():
+
+        pwd = self.admin_password.strip().lower()
+        if pwd in KNOWN_INSECURE_OR_PLACEHOLDER_PASSWORDS or "placeholder" in pwd:
             return False
+
+        if not self.admin_username.strip():
+            return False
+
         return True
 
     async def get_admin_token(self, force_refresh: bool = False) -> str:
         """Authenticate with Apache Superset using service credentials and return access token."""
+        if not self.is_configured():
+            raise SupersetIntegrationError(
+                "Apache Superset integration is not configured. "
+                "Valid service credentials (SUPERSET_ADMIN_USERNAME, SUPERSET_ADMIN_PASSWORD) must be provided in the environment."
+            )
+
         now = datetime.now(timezone.utc)
 
         # Return cached token if valid (less than 45 minutes old)
@@ -186,6 +216,14 @@ class SupersetService:
     async def check_health(self) -> Dict[str, Any]:
         """Check Superset service reachability and status."""
         configured = self.is_configured()
+        if not configured:
+            return {
+                "configured": False,
+                "superset_url": self.base_url,
+                "connected": False,
+                "status_detail": "Unconfigured: SUPERSET_ADMIN_USERNAME and SUPERSET_ADMIN_PASSWORD must be configured with valid service credentials.",
+            }
+
         health_url = f"{self.base_url}/health"
 
         try:

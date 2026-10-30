@@ -23,8 +23,17 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Set database URL dynamically from app settings
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# Allow URL override from config, CLI (-x db_url=...), or environment variable
+target_url = (
+    context.get_x_argument(as_dictionary=True).get("db_url")
+    or os.environ.get("DATABASE_URL")
+    or config.get_main_option("sqlalchemy.url")
+)
+
+if not target_url or target_url == "driver://user:pass@localhost/dbname":
+    target_url = settings.DATABASE_URL
+
+config.set_main_option("sqlalchemy.url", target_url)
 
 target_metadata = Base.metadata
 
@@ -44,7 +53,11 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        render_as_batch=True if connection.dialect.name == "sqlite" else False,
+    )
 
     with context.begin_transaction():
         context.run_migrations()
@@ -54,10 +67,19 @@ async def run_async_migrations() -> None:
     """In this scenario we need to create an Engine
     and associate a connection with the context.
     """
+    section = config.get_section(config.config_ini_section, {})
+    url = config.get_main_option("sqlalchemy.url")
+    section["sqlalchemy.url"] = url
+
+    connect_args = {}
+    if "sqlite" in url:
+        connect_args["check_same_thread"] = False
+
     connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
+        section,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args=connect_args,
     )
 
     async with connectable.connect() as connection:

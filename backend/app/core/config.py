@@ -1,5 +1,5 @@
 import json
-from typing import List, Union
+from typing import List, Optional, Union
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -41,8 +41,9 @@ class Settings(BaseSettings):
         return []
 
     # Dedicated PostgreSQL Application Database
-    # NOTE: Never point this to bank_dwh_real
-    DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/banking_portal_db"
+    # NOTE: Never point this to bank_dwh_real.
+    # When connecting from Windows host to Docker Compose Postgres, use host port 5433.
+    DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5433/banking_portal_db"
 
     # Security & Tokens
     SECRET_KEY: str = "insecure-dev-secret-key-replace-in-production-32-chars-min"
@@ -61,15 +62,16 @@ class Settings(BaseSettings):
     CSRF_COOKIE_NAME: str = "portal_csrf_token"
     CSRF_HEADER_NAME: str = "X-CSRF-Token"
 
-    # Superset Embedded Integration
+    # Superset Embedded Integration (Optional until integration is configured)
     SUPERSET_BASE_URL: str = "http://localhost:8088"
-    SUPERSET_ADMIN_USERNAME: str = "admin"
-    SUPERSET_ADMIN_PASSWORD: str = "admin_password_placeholder"
+    SUPERSET_ADMIN_USERNAME: Optional[str] = None
+    SUPERSET_ADMIN_PASSWORD: Optional[str] = None
     SUPERSET_GUEST_TOKEN_TIMEOUT_SECS: int = 300
 
-    # Default initial superuser
-    FIRST_SUPERUSER_EMAIL: str = "admin@bankportal.internal"
-    FIRST_SUPERUSER_PASSWORD: str = "AdminBanking123!"
+    # Initial Administrator Configuration
+    # Requires explicit, secure configuration when initializing a fresh database.
+    FIRST_SUPERUSER_EMAIL: Optional[str] = None
+    FIRST_SUPERUSER_PASSWORD: Optional[str] = None
     FIRST_SUPERUSER_FULL_NAME: str = "System Administrator"
 
 
