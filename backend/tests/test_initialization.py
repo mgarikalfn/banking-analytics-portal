@@ -7,10 +7,10 @@ from alembic import command
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.core.config import settings
+from app.core.config import settings, validate_signing_key
 from app.core.database import Base
 from app.core.exceptions import SupersetIntegrationError
-from app.core.security import verify_password
+from app.core.security import hash_password, verify_password
 from app.main import init_default_data, validate_initial_admin_credentials
 from app.models.dashboard import Dashboard
 from app.models.role import Role
@@ -92,6 +92,49 @@ def test_alembic_migration_upgrade_and_downgrade():
                 pass
 
 
+def test_validate_signing_keys_missing_short_and_placeholders():
+    """Strictly reject missing, short, and placeholder signing keys."""
+    # 1. Missing keys
+    with pytest.raises(ValueError, match="SECRET_KEY is required"):
+        validate_signing_key("SECRET_KEY", None)
+
+    with pytest.raises(ValueError, match="SECRET_KEY is required"):
+        validate_signing_key("SECRET_KEY", "   ")
+
+    # 2. Too short (< 32 characters)
+    with pytest.raises(ValueError, match="too short"):
+        validate_signing_key("SECRET_KEY", "only-sixteen-chr")
+
+    # 3. Known insecure patterns and placeholders
+    insecure_keys = [
+        "insecure-dev-secret-key-replace-in-production-32-chars-min",
+        "REPLACE_WITH_YOUR_OWN_GENERATED_32_CHAR_SECRET_KEY_PLACEHOLDER",
+        "change-this-secret-key-for-production-environment-32c",
+        "configure_random_key_that_is_at_least_thirty_two_chars",
+        "dev-secret-key-minimum-32-characters-long-for-testing",
+        "example_secret_key_minimum_32_chars_long_placeholder",
+    ]
+    for key in insecure_keys:
+        with pytest.raises(ValueError, match="contains known insecure or placeholder pattern"):
+            validate_signing_key("SECRET_KEY", key)
+
+    # 4. Valid 32+ character random key passes
+    valid_key = "a1b2c3d4e5f678901234567890abcdefa1b2c3d4e5f678901234567890abcdef"
+    assert validate_signing_key("SECRET_KEY", valid_key) == valid_key
+
+
+def test_settings_validate_security_keys_method(monkeypatch):
+    """Calling settings.validate_security_keys() validates both SECRET_KEY and CSRF_SECRET_KEY."""
+    monkeypatch.setattr(settings, "SECRET_KEY", None)
+    with pytest.raises(ValueError, match="SECRET_KEY is required"):
+        settings.validate_security_keys()
+
+    monkeypatch.setattr(settings, "SECRET_KEY", "a1b2c3d4e5f678901234567890abcdefa1b2c3d4e5f678901234567890abcdef")
+    monkeypatch.setattr(settings, "CSRF_SECRET_KEY", "insecure-csrf-key-placeholder-1234567890")
+    with pytest.raises(ValueError, match="CSRF_SECRET_KEY contains known insecure or placeholder pattern"):
+        settings.validate_security_keys()
+
+
 @pytest.mark.asyncio
 async def test_validate_initial_admin_credentials():
     """Verify password safety checks for initial administrator configuration."""
@@ -115,6 +158,8 @@ async def test_validate_initial_admin_credentials():
         "my_placeholder_pwd",
         "12345678",
         "qwerty1234",
+        "REPLACE_WITH_YOUR_OWN_STRONG_PASSWORD_PLACEHOLDER",
+        "ConfigureAStrongInitialPassword123!",
     ]
     for pwd in insecure_defaults:
         with pytest.raises(ValueError, match="cannot be a known default or placeholder"):
@@ -209,6 +254,68 @@ async def test_seed_missing_admin_config_raises_error(monkeypatch):
 
     with pytest.raises(ValueError, match="FIRST_SUPERUSER_EMAIL is required"):
         await init_default_data()
+
+    await test_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_seed_collision_with_existing_non_superuser_fails_safely(monkeypatch):
+    """If a non-superuser user already exists with FIRST_SUPERUSER_EMAIL, fail cleanly without promoting."""
+    test_engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+    )
+    async_session = async_sessionmaker(
+        bind=test_engine,
+        expire_on_commit=False,
+        class_=AsyncSession,
+    )
+
+    async with test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    # 1. Pre-create a regular (non-superuser) account
+    existing_user_pwd = "UserOriginalSecurePassword999!"
+    async with async_session() as session:
+        regular_user = User(
+            email="collision@bank.internal",
+            hashed_password=hash_password(existing_user_pwd),
+            full_name="Regular Staff Member",
+            is_active=True,
+            is_superuser=False,
+        )
+        session.add(regular_user)
+        await session.commit()
+        original_hash = regular_user.hashed_password
+        original_id = regular_user.id
+
+    # 2. Attempt to initialize superuser with the SAME email address
+    monkeypatch.setattr("app.main.async_session_factory", async_session)
+    monkeypatch.setattr(settings, "FIRST_SUPERUSER_EMAIL", "collision@bank.internal")
+    monkeypatch.setattr(settings, "FIRST_SUPERUSER_PASSWORD", "NewAdminSecurePassword777!")
+
+    # Must raise a clear collision error
+    with pytest.raises(ValueError, match="Account collision"):
+        await init_default_data()
+
+    # 3. Verify the existing user was preserved: NOT promoted, password unchanged
+    async with async_session() as session:
+        res = await session.execute(
+            select(User).where(User.email == "collision@bank.internal")
+        )
+        user_after = res.scalars().first()
+        assert user_after is not None
+        assert user_after.id == original_id
+        assert user_after.is_superuser is False  # NOT promoted!
+        assert user_after.hashed_password == original_hash
+        assert verify_password(existing_user_pwd, user_after.hashed_password)
+        assert not verify_password("NewAdminSecurePassword777!", user_after.hashed_password)
+
+        # Confirm no superusers exist in the system
+        superusers = (
+            await session.execute(select(User).where(User.is_superuser == True))
+        ).scalars().all()
+        assert len(superusers) == 0
 
     await test_engine.dispose()
 

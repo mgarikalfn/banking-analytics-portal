@@ -3,6 +3,44 @@ from typing import List, Optional, Union
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+INSECURE_KEY_PATTERNS = [
+    "insecure",
+    "placeholder",
+    "replace-in-production",
+    "change-this",
+    "changethis",
+    "configure_random",
+    "dev-secret",
+    "test-secret",
+    "your_strong",
+    "secret_key",
+    "example",
+]
+
+
+def validate_signing_key(key_name: str, key_value: Optional[str]) -> str:
+    """Validate that a signing key is configured, meets length requirements, and is not a placeholder."""
+    if not key_value or not key_value.strip():
+        raise ValueError(
+            f"{key_name} is required. Please set a cryptographically random key (at least 32 characters) in your environment."
+        )
+
+    cleaned = key_value.strip()
+    if len(cleaned) < 32:
+        raise ValueError(
+            f"{key_name} is too short ({len(cleaned)} characters). Minimum required length is 32 characters."
+        )
+
+    lower = cleaned.lower()
+    for pattern in INSECURE_KEY_PATTERNS:
+        if pattern in lower:
+            raise ValueError(
+                f"{key_name} contains known insecure or placeholder pattern '{pattern}'. "
+                "Please configure a cryptographically random 32+ character key (e.g., using 'openssl rand -hex 32')."
+            )
+
+    return cleaned
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -45,8 +83,8 @@ class Settings(BaseSettings):
     # When connecting from Windows host to Docker Compose Postgres, use host port 5433.
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5433/banking_portal_db"
 
-    # Security & Tokens
-    SECRET_KEY: str = "insecure-dev-secret-key-replace-in-production-32-chars-min"
+    # Security & Tokens (Explicit environment configuration required - no insecure fallbacks)
+    SECRET_KEY: Optional[str] = None
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
@@ -57,8 +95,8 @@ class Settings(BaseSettings):
     COOKIE_SAMESITE: str = "lax"
     COOKIE_DOMAIN: str = ""
 
-    # CSRF Protection
-    CSRF_SECRET_KEY: str = "insecure-dev-csrf-secret-key-32-chars-long"
+    # CSRF Protection (Explicit environment configuration required - no insecure fallbacks)
+    CSRF_SECRET_KEY: Optional[str] = None
     CSRF_COOKIE_NAME: str = "portal_csrf_token"
     CSRF_HEADER_NAME: str = "X-CSRF-Token"
 
@@ -73,6 +111,11 @@ class Settings(BaseSettings):
     FIRST_SUPERUSER_EMAIL: Optional[str] = None
     FIRST_SUPERUSER_PASSWORD: Optional[str] = None
     FIRST_SUPERUSER_FULL_NAME: str = "System Administrator"
+
+    def validate_security_keys(self) -> None:
+        """Strictly validate that production signing keys are configured, sufficiently long, and non-default."""
+        validate_signing_key("SECRET_KEY", self.SECRET_KEY)
+        validate_signing_key("CSRF_SECRET_KEY", self.CSRF_SECRET_KEY)
 
 
 settings = Settings()

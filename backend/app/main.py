@@ -36,9 +36,22 @@ INSECURE_PASSWORDS = {
     "secret",
 }
 
+INSECURE_PASSWORD_PATTERNS = [
+    "placeholder",
+    "changethis",
+    "change-this",
+    "changeme",
+    "admin123",
+    "password123",
+    "configure",
+    "replace_with",
+    "replace-with",
+    "example",
+]
+
 
 def validate_initial_admin_credentials(email: Optional[str], password: Optional[str]) -> None:
-    """Validate that initial administrator credentials are explicitly provided and secure."""
+    """Validate that initial administrator credentials are explicitly provided, sufficiently strong, and non-default."""
     if not email or not email.strip():
         raise ValueError(
             "FIRST_SUPERUSER_EMAIL is required for initial portal administrator setup."
@@ -48,7 +61,7 @@ def validate_initial_admin_credentials(email: Optional[str], password: Optional[
             "FIRST_SUPERUSER_PASSWORD is required and must be at least 8 characters."
         )
     cleaned_pwd = password.strip().lower()
-    if cleaned_pwd in INSECURE_PASSWORDS or "placeholder" in cleaned_pwd:
+    if cleaned_pwd in INSECURE_PASSWORDS or any(p in cleaned_pwd for p in INSECURE_PASSWORD_PATTERNS):
         raise ValueError(
             "FIRST_SUPERUSER_PASSWORD cannot be a known default or placeholder. "
             "Please configure a strong, unique administrator password in the environment."
@@ -56,11 +69,42 @@ def validate_initial_admin_credentials(email: Optional[str], password: Optional[
 
 
 async def init_default_data() -> None:
-    """Seed base roles, administrator, and dashboard metadata idempotently."""
+    """Seed base roles, administrator, and dashboard metadata idempotently.
+    
+    Validation occurs before any seed changes are made.
+    Collisions with existing non-superuser accounts fail safely without promoting accounts.
+    """
     async with async_session_factory() as session:
         from sqlalchemy import select
 
-        # 1. Seed standard banking roles idempotently
+        # 1. Check if any superuser already exists in the system
+        stmt = select(User).where(User.is_superuser == True)
+        res = await session.execute(stmt)
+        existing_superuser = res.scalars().first()
+
+        new_admin_required = existing_superuser is None
+
+        # 2. If a new administrator is required, validate BEFORE any seed modifications
+        if new_admin_required:
+            validate_initial_admin_credentials(
+                settings.FIRST_SUPERUSER_EMAIL, settings.FIRST_SUPERUSER_PASSWORD
+            )
+
+            # Check for account collision: existing user with admin email who is not superuser
+            admin_email = settings.FIRST_SUPERUSER_EMAIL.lower().strip()
+            stmt = select(User).where(User.email == admin_email)
+            res = await session.execute(stmt)
+            existing_user = res.scalars().first()
+
+            if existing_user:
+                raise ValueError(
+                    f"Account collision: A non-administrator user with email '{admin_email}' already exists in the database. "
+                    "Cannot initialize superuser under this address without compromising existing user records. "
+                    "Existing user password and permissions have been preserved. "
+                    "Please configure a distinct FIRST_SUPERUSER_EMAIL in your environment."
+                )
+
+        # 3. Seed standard banking roles idempotently
         roles_data = [
             ("admin", "Full system administrator"),
             ("executive", "Executive leadership with portfolio overview"),
@@ -82,43 +126,25 @@ async def init_default_data() -> None:
             else:
                 created_roles[role_name] = existing
 
-        # 2. Seed initial administrator idempotently
-        stmt = select(User).where(User.is_superuser == True)
-        res = await session.execute(stmt)
-        existing_superuser = res.scalars().first()
-
+        # 4. Create initial administrator if required
         if existing_superuser:
             logger.info(
                 f"Superuser already exists ({existing_superuser.email}); "
                 "preserving existing administrator credentials without modification."
             )
         else:
-            # Require explicit, secure administrator credentials when initializing
-            validate_initial_admin_credentials(
-                settings.FIRST_SUPERUSER_EMAIL, settings.FIRST_SUPERUSER_PASSWORD
+            admin_user = User(
+                email=settings.FIRST_SUPERUSER_EMAIL.lower().strip(),
+                hashed_password=hash_password(settings.FIRST_SUPERUSER_PASSWORD),
+                full_name=settings.FIRST_SUPERUSER_FULL_NAME,
+                is_active=True,
+                is_superuser=True,
+                roles=[created_roles["admin"]] if "admin" in created_roles else [],
             )
+            session.add(admin_user)
+            logger.info(f"Initialized new superuser: {admin_user.email}")
 
-            stmt = select(User).where(User.email == settings.FIRST_SUPERUSER_EMAIL.lower().strip())
-            res = await session.execute(stmt)
-            user_by_email = res.scalars().first()
-
-            if user_by_email:
-                logger.info(
-                    f"User {user_by_email.email} already exists; preserving existing password."
-                )
-            else:
-                admin_user = User(
-                    email=settings.FIRST_SUPERUSER_EMAIL.lower().strip(),
-                    hashed_password=hash_password(settings.FIRST_SUPERUSER_PASSWORD),
-                    full_name=settings.FIRST_SUPERUSER_FULL_NAME,
-                    is_active=True,
-                    is_superuser=True,
-                    roles=[created_roles["admin"]] if "admin" in created_roles else [],
-                )
-                session.add(admin_user)
-                logger.info(f"Initialized new superuser: {admin_user.email}")
-
-        # 3. Seed representative dashboard placeholders idempotently
+        # 5. Seed representative dashboard placeholders idempotently
         dashboards_data = [
             {
                 "slug": "executive-summary",
@@ -183,9 +209,11 @@ async def init_default_data() -> None:
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application startup and shutdown lifespan handler."""
     logger.info("Starting Banking Analytics Portal backend...")
-    # NOTE: Schema management is strictly handled via Alembic migrations.
-    # Base.metadata.create_all is intentionally removed.
 
+    # 1. Startup validation of cryptographic signing keys
+    settings.validate_security_keys()
+
+    # 2. Seed default data idempotently (schema is managed via Alembic)
     try:
         await init_default_data()
     except Exception as e:

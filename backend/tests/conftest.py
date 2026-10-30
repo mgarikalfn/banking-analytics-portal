@@ -9,6 +9,14 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from app.core.config import settings
+
+# Configure valid 32+ character keys for automated test suite execution
+if not settings.SECRET_KEY or "insecure" in settings.SECRET_KEY.lower():
+    settings.SECRET_KEY = "a1b2c3d4e5f678901234567890abcdefa1b2c3d4e5f678901234567890abcdef"
+if not settings.CSRF_SECRET_KEY or "insecure" in settings.CSRF_SECRET_KEY.lower():
+    settings.CSRF_SECRET_KEY = "fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321"
+
 from app.core.database import Base, get_db
 from app.core.security import hash_password
 from app.main import app
