@@ -122,12 +122,61 @@ class SupersetService:
                 f"Failed to communicate with Superset service: {str(e)}"
             )
 
+    async def _fetch_csrf_token(self, client: httpx.AsyncClient, admin_token: str) -> str:
+        """Fetch a CSRF token from Superset using an authenticated session.
+
+        The same ``httpx.AsyncClient`` instance must be reused for the subsequent
+        guest-token POST so that Superset's session cookie (set during the CSRF
+        request) is sent along with the CSRF header — both are required for
+        Superset's double-submit CSRF validation.
+
+        Returns the raw CSRF token string.
+        Raises :class:`SupersetIntegrationError` on any failure.
+        """
+        csrf_url = f"{self.base_url}/api/v1/security/csrf_token/"
+        try:
+            csrf_response = await client.get(
+                csrf_url,
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+            csrf_response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "Failed to obtain Superset CSRF token: HTTP %s", e.response.status_code
+            )
+            raise SupersetIntegrationError(
+                f"Failed to obtain Superset CSRF token ({e.response.status_code})."
+            ) from e
+        except httpx.RequestError as e:
+            logger.error("Network error fetching Superset CSRF token: %s", e)
+            raise SupersetIntegrationError(
+                f"Network error while fetching Superset CSRF token: {e}"
+            ) from e
+
+        csrf_token: Optional[str] = csrf_response.json().get("result")
+        if not csrf_token:
+            raise SupersetIntegrationError(
+                "Superset CSRF token response did not contain a 'result' field."
+            )
+        return csrf_token
+
     async def generate_guest_token(
         self, user: User, dashboard: Dashboard
     ) -> SupersetGuestTokenResponse:
         """Generate a secure guest token for an authorized user to embed a dashboard.
-        
-        RLS rules are intentionally left uninvented until verified dataset fields 
+
+        Flow (all within a **single** ``httpx.AsyncClient`` session so that the
+        Superset session cookie obtained during the CSRF request is automatically
+        included in the subsequent guest-token POST):
+
+        1. Obtain a Superset admin access token (cached up to 45 min).
+        2. GET ``/api/v1/security/csrf_token/`` → extract CSRF token from ``result``.
+        3. POST ``/api/v1/security/guest_token/`` with ``Authorization: Bearer``
+           **and** ``X-CSRFToken`` headers.
+        4. If the POST returns 401 (access token expired), refresh the admin token,
+           fetch a new CSRF token (still in the same client session), and retry once.
+
+        RLS rules are intentionally left uninvented until verified dataset fields
         and branch mappings are provided.
         """
         admin_token = await self.get_admin_token()
@@ -164,21 +213,31 @@ class SupersetService:
         }
 
         guest_token_url = f"{self.base_url}/api/v1/security/guest_token/"
-        headers = {
-            "Authorization": f"Bearer {admin_token}",
-            "Content-Type": "application/json",
-        }
 
         try:
+            # A single client session is required: the CSRF GET sets a Superset
+            # session cookie that must accompany the X-CSRFToken header in the POST.
             async with httpx.AsyncClient(timeout=10.0) as client:
+                # Step 1: fetch CSRF token
+                csrf_token = await self._fetch_csrf_token(client, admin_token)
+
+                headers = {
+                    "Authorization": f"Bearer {admin_token}",
+                    "Content-Type": "application/json",
+                    "X-CSRFToken": csrf_token,
+                }
+
                 response = await client.post(
                     guest_token_url, json=guest_payload, headers=headers
                 )
 
-                # If token expired on Superset side, retry once with refreshed token
+                # If access token expired on Superset side, refresh once.
+                # A fresh CSRF token is also required after re-authentication.
                 if response.status_code == 401:
                     admin_token = await self.get_admin_token(force_refresh=True)
+                    csrf_token = await self._fetch_csrf_token(client, admin_token)
                     headers["Authorization"] = f"Bearer {admin_token}"
+                    headers["X-CSRFToken"] = csrf_token
                     response = await client.post(
                         guest_token_url, json=guest_payload, headers=headers
                     )
@@ -202,13 +261,15 @@ class SupersetService:
 
         except httpx.HTTPStatusError as e:
             logger.error(
-                f"Failed to generate guest token: {e.response.status_code} - {e.response.text}"
+                "Failed to generate guest token: %s - %s",
+                e.response.status_code,
+                e.response.text,
             )
             raise SupersetIntegrationError(
                 f"Superset failed to issue guest token ({e.response.status_code}): {e.response.text}"
             )
         except httpx.RequestError as e:
-            logger.error(f"Error calling Superset guest token API: {e}")
+            logger.error("Error calling Superset guest token API: %s", e)
             raise SupersetIntegrationError(
                 f"Network error while requesting Superset guest token: {str(e)}"
             )
