@@ -193,10 +193,18 @@ When you are ready to connect a live Apache Superset instance:
 
 2. **Set Credentials in `.env`**:
    ```ini
-   SUPERSET_BASE_URL="http://localhost:8088"
+   # Backend-to-Superset URL (use host.docker.internal when the backend runs in Docker)
+   SUPERSET_BASE_URL="http://host.docker.internal:8088"
+   # Browser-to-Superset URL (used by the Embedded SDK)
+   SUPERSET_BROWSER_URL="http://localhost:8088"
    SUPERSET_ADMIN_USERNAME="your-superset-admin"
    SUPERSET_ADMIN_PASSWORD="your-superset-password"
    ```
+
+   `SUPERSET_BASE_URL` is used only for FastAPI's Superset REST API calls.
+   `SUPERSET_BROWSER_URL` is returned as the browser-facing embedding domain.
+   Keep `host.docker.internal` out of `SUPERSET_BROWSER_URL`, because it is not
+   resolvable from the local browser.
 
 3. **Map Dashboard Embedded UUID**:
    In Apache Superset, click **...** -> **Embed dashboard** -> copy the **Embedded UUID**. Update the corresponding dashboard's `superset_dashboard_id` via the portal Admin API.

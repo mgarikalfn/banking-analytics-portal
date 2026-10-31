@@ -43,7 +43,7 @@ function DashboardDetailView() {
     <div className="flex flex-1">
       <Sidebar />
 
-      <main className="flex-1 p-6 sm:p-8 lg:p-10 max-w-7xl mx-auto w-full">
+      <main className="flex-1 w-full min-w-0 p-4 sm:p-6 lg:p-8">
         {/* Breadcrumb & Navigation */}
         <div className="mb-4">
           <Link

@@ -118,9 +118,10 @@ def _make_mock_response(status_code: int, json_body: dict) -> MagicMock:
 
 
 def _configured_service() -> SupersetService:
-    """Return a SupersetService that reports as configured."""
+    """Return a service with distinct backend and browser Superset URLs."""
     svc = SupersetService(
         base_url="http://superset.test:8088",
+        browser_url="http://localhost:8088",
         admin_username="svc_admin",
         admin_password="Str0ngS3rviceP@ss!",
     )
@@ -141,6 +142,47 @@ def _mock_dashboard(requires_branch_scope: bool = False) -> MagicMock:
     dash.title = "Test Dashboard"
     dash.requires_branch_scope = requires_branch_scope
     return dash
+
+
+@pytest.mark.asyncio
+async def test_get_admin_token_login_success():
+    """A successful Superset login returns and caches the access token."""
+    svc = _configured_service()
+    login_response = _make_mock_response(
+        200, {"access_token": "admin.jwt", "refresh_token": "refresh.jwt"}
+    )
+    mock_client = MagicMock()
+    mock_client.post = AsyncMock(return_value=login_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch(
+        "app.services.superset_service.httpx.AsyncClient",
+        return_value=mock_client,
+    ):
+        token = await svc.get_admin_token(force_refresh=True)
+
+    assert token == "admin.jwt"
+    assert SupersetService._cached_admin_token == "admin.jwt"
+    mock_client.post.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_admin_token_rejects_invalid_credentials():
+    """Invalid Superset service credentials produce a safe integration error."""
+    svc = _configured_service()
+    response = _make_mock_response(401, {"message": "Invalid credentials"})
+    mock_client = MagicMock()
+    mock_client.post = AsyncMock(return_value=response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch(
+        "app.services.superset_service.httpx.AsyncClient",
+        return_value=mock_client,
+    ):
+        with pytest.raises(SupersetIntegrationError, match="Invalid service credentials"):
+            await svc.get_admin_token(force_refresh=True)
 
 
 @pytest.mark.asyncio
@@ -180,9 +222,12 @@ async def test_generate_guest_token_csrf_flow_success():
 
     assert result.token == "guest.jwt.token"
     assert result.superset_dashboard_id == "uuid-dash-0001"
-    assert result.superset_domain == "http://superset.test:8088"
+    assert result.superset_domain == "http://localhost:8088"
     assert "GET" in call_log[0] and "csrf_token" in call_log[0]
     assert "POST" in call_log[1] and "guest_token" in call_log[1]
+    assert "http://superset.test:8088" in call_log[0]
+    assert "http://superset.test:8088" in call_log[1]
+    assert all("host.docker.internal" not in call for call in call_log)
 
 
 @pytest.mark.asyncio
@@ -201,6 +246,80 @@ async def test_generate_guest_token_csrf_fetch_http_error():
     with patch("app.services.superset_service.httpx.AsyncClient", return_value=mock_client):
         with pytest.raises(SupersetIntegrationError, match="CSRF token"):
             await svc.generate_guest_token(_mock_user(), _mock_dashboard())
+
+
+@pytest.mark.asyncio
+async def test_generate_guest_token_refreshes_after_csrf_401():
+    """A stale cached admin token is invalidated and refreshed after CSRF 401."""
+    svc = _configured_service()
+    svc.get_admin_token = AsyncMock(
+        side_effect=["stale-admin-token", "fresh-admin-token"]
+    )
+    csrf_401 = _make_mock_response(401, {"message": "Unauthorized"})
+    csrf_ok = _make_mock_response(200, {"result": "csrf-fresh"})
+    guest_ok = _make_mock_response(200, {"token": "guest.jwt.token"})
+    get_calls = 0
+
+    async def fake_get(url, **kwargs):
+        nonlocal get_calls
+        get_calls += 1
+        return csrf_401 if get_calls == 1 else csrf_ok
+
+    mock_client = MagicMock()
+    mock_client.get = fake_get
+    mock_client.post = AsyncMock(return_value=guest_ok)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aenter__.side_effect = [
+        mock_client,
+        mock_client,
+    ]
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch(
+        "app.services.superset_service.httpx.AsyncClient",
+        return_value=mock_client,
+    ):
+        result = await svc.generate_guest_token(_mock_user(), _mock_dashboard())
+
+    assert result.token == "guest.jwt.token"
+    assert svc.get_admin_token.call_count == 2
+    assert svc.get_admin_token.call_args_list[1][1]["force_refresh"] is True
+    assert mock_client.post.await_args.kwargs["headers"]["Authorization"].endswith(
+        "fresh-admin-token"
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_guest_token_refreshes_after_csrf_422():
+    """Superset may report an invalid cached JWT as CSRF HTTP 422."""
+    svc = _configured_service()
+    svc.get_admin_token = AsyncMock(
+        side_effect=["stale-admin-token", "fresh-admin-token"]
+    )
+    csrf_422 = _make_mock_response(422, {"message": "Invalid JWT"})
+    csrf_ok = _make_mock_response(200, {"result": "csrf-fresh"})
+    guest_ok = _make_mock_response(200, {"token": "guest.jwt.token"})
+    get_calls = 0
+
+    async def fake_get(url, **kwargs):
+        nonlocal get_calls
+        get_calls += 1
+        return csrf_422 if get_calls == 1 else csrf_ok
+
+    mock_client = MagicMock()
+    mock_client.get = fake_get
+    mock_client.post = AsyncMock(return_value=guest_ok)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch(
+        "app.services.superset_service.httpx.AsyncClient",
+        return_value=mock_client,
+    ):
+        result = await svc.generate_guest_token(_mock_user(), _mock_dashboard())
+
+    assert result.token == "guest.jwt.token"
+    assert svc.get_admin_token.call_count == 2
 
 
 @pytest.mark.asyncio

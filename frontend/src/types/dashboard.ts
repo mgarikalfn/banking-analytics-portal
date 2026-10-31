@@ -17,6 +17,7 @@ export interface Dashboard {
 export interface GuestTokenResponse {
   token: string;
   superset_dashboard_id: string;
+  /** Browser-facing Superset URL used by the Embedded SDK. */
   superset_domain: string;
   expires_in: number;
   dashboard_title: string;

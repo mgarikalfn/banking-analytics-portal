@@ -21,6 +21,10 @@ KNOWN_INSECURE_OR_PLACEHOLDER_PASSWORDS = {
 }
 
 
+class _SupersetAuthenticationError(Exception):
+    """Signal that the cached Superset bearer token must be refreshed."""
+
+
 class SupersetService:
     """Backend service for Apache Superset integration.
     
@@ -34,10 +38,14 @@ class SupersetService:
     def __init__(
         self,
         base_url: Optional[str] = None,
+        browser_url: Optional[str] = None,
         admin_username: Optional[str] = None,
         admin_password: Optional[str] = None,
     ):
         self.base_url = (base_url or settings.SUPERSET_BASE_URL or "").rstrip("/")
+        self.browser_url = (
+            browser_url or settings.SUPERSET_BROWSER_URL or ""
+        ).rstrip("/")
         self.admin_username = (
             admin_username if admin_username is not None else settings.SUPERSET_ADMIN_USERNAME
         )
@@ -58,6 +66,13 @@ class SupersetService:
             return False
 
         return True
+
+    @classmethod
+    def _invalidate_cached_admin_token(cls, token: Optional[str] = None) -> None:
+        """Invalidate the cache only when it still contains the failed token."""
+        if token is None or cls._cached_admin_token == token:
+            cls._cached_admin_token = None
+            cls._token_fetched_at = None
 
     async def get_admin_token(self, force_refresh: bool = False) -> str:
         """Authenticate with Apache Superset using service credentials and return access token."""
@@ -144,6 +159,8 @@ class SupersetService:
             logger.error(
                 "Failed to obtain Superset CSRF token: HTTP %s", e.response.status_code
             )
+            if e.response.status_code in (401, 422):
+                raise _SupersetAuthenticationError from e
             raise SupersetIntegrationError(
                 f"Failed to obtain Superset CSRF token ({e.response.status_code})."
             ) from e
@@ -161,7 +178,11 @@ class SupersetService:
         return csrf_token
 
     async def generate_guest_token(
-        self, user: User, dashboard: Dashboard
+        self,
+        user: User,
+        dashboard: Dashboard,
+        _allow_auth_retry: bool = True,
+        _force_auth_refresh: bool = False,
     ) -> SupersetGuestTokenResponse:
         """Generate a secure guest token for an authorized user to embed a dashboard.
 
@@ -179,7 +200,7 @@ class SupersetService:
         RLS rules are intentionally left uninvented until verified dataset fields
         and branch mappings are provided.
         """
-        admin_token = await self.get_admin_token()
+        admin_token = await self.get_admin_token(force_refresh=_force_auth_refresh)
 
         # Parse user names for Superset guest context
         name_parts = user.full_name.split() if user.full_name else ["Portal", "User"]
@@ -234,6 +255,7 @@ class SupersetService:
                 # If access token expired on Superset side, refresh once.
                 # A fresh CSRF token is also required after re-authentication.
                 if response.status_code == 401:
+                    self._invalidate_cached_admin_token(admin_token)
                     admin_token = await self.get_admin_token(force_refresh=True)
                     csrf_token = await self._fetch_csrf_token(client, admin_token)
                     headers["Authorization"] = f"Bearer {admin_token}"
@@ -253,12 +275,24 @@ class SupersetService:
                 return SupersetGuestTokenResponse(
                     token=token,
                     superset_dashboard_id=str(dashboard.superset_dashboard_id),
-                    superset_domain=self.base_url,
+                    superset_domain=self.browser_url,
                     expires_in=settings.SUPERSET_GUEST_TOKEN_TIMEOUT_SECS,
                     dashboard_title=dashboard.title,
                     requires_branch_scope=dashboard.requires_branch_scope,
                 )
 
+        except _SupersetAuthenticationError as e:
+            self._invalidate_cached_admin_token(admin_token)
+            if _allow_auth_retry:
+                return await self.generate_guest_token(
+                    user,
+                    dashboard,
+                    _allow_auth_retry=False,
+                    _force_auth_refresh=True,
+                )
+            raise SupersetIntegrationError(
+                "Superset authentication failed while obtaining a CSRF token after refreshing the service token."
+            ) from e
         except httpx.HTTPStatusError as e:
             logger.error(
                 "Failed to generate guest token: %s - %s",

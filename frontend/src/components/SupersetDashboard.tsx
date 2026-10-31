@@ -1,15 +1,13 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { embedDashboard } from "@superset-ui/embedded-sdk";
 import { fetchApi } from "@/lib/api";
 import { GuestTokenResponse } from "@/types/dashboard";
 import {
   AlertTriangle,
   RefreshCw,
-  Server,
   ShieldCheck,
-  ExternalLink,
 } from "lucide-react";
 
 interface SupersetDashboardProps {
@@ -26,12 +24,12 @@ export function SupersetDashboard({
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const [initialData, setInitialData] = useState<GuestTokenResponse | null>(null);
 
-  const loadAndEmbed = async () => {
+  const loadAndEmbed = useCallback(async () => {
     setIsLoading(true);
     setErrorDetail(null);
 
     try {
-      // 1. Fetch initial token from backend to get superset domain & dashboard id
+      // 1. Fetch the backend-issued guest token and browser-facing Superset URL.
       const tokenData = await fetchApi<GuestTokenResponse>(
         "/api/v1/superset/guest-token",
         {
@@ -49,6 +47,7 @@ export function SupersetDashboard({
       // 2. Embed dashboard using Apache Superset Embedded SDK
       await embedDashboard({
         id: tokenData.superset_dashboard_id,
+        // The backend returns this URL for browser access; credentials stay server-side.
         supersetDomain: tokenData.superset_domain,
         mountPoint: containerRef.current,
         fetchGuestToken: async () => {
@@ -76,9 +75,10 @@ export function SupersetDashboard({
       const iframe = containerRef.current.querySelector("iframe");
       if (iframe) {
         iframe.style.width = "100%";
-        iframe.style.height = "100%";
+        iframe.style.height = "calc(100vh - 16rem)";
         iframe.style.border = "none";
-        iframe.style.minHeight = "780px";
+        iframe.style.minHeight = "800px";
+        iframe.style.display = "block";
       }
 
       setIsLoading(false);
@@ -90,11 +90,14 @@ export function SupersetDashboard({
         setErrorDetail("Failed to establish secure connection to Superset service.");
       }
     }
-  };
+  }, [dashboardId]);
 
   useEffect(() => {
-    loadAndEmbed();
-  }, [dashboardId]);
+    const timer = window.setTimeout(() => {
+      void loadAndEmbed();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadAndEmbed]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -154,10 +157,10 @@ export function SupersetDashboard({
                       superset_config.py
                     </code>
                     : <code className="font-mono">EMBEDDED_SUPERSET = True</code> and{" "}
-                    <code className="font-mono">GUEST_ROLE_NAME = "Public"</code>.
+                    <code className="font-mono">GUEST_ROLE_NAME = &quot;Public&quot;</code>.
                   </li>
                   <li>
-                    In Superset, enable "Embed Dashboard" on the target dashboard to generate its unique Embedded UUID.
+                    In Superset, enable &quot;Embed Dashboard&quot; on the target dashboard to generate its unique Embedded UUID.
                   </li>
                 </ul>
               </div>
@@ -186,6 +189,7 @@ export function SupersetDashboard({
       {/* Mount point for the Superset Embedded SDK */}
       <div
         ref={containerRef}
+        aria-label={dashboardTitle}
         className={`w-full overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xs dark:border-slate-800 dark:bg-slate-900 ${
           isLoading || errorDetail ? "hidden" : "block min-h-[800px]"
         }`}

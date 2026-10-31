@@ -32,7 +32,9 @@ class SupersetGuestTokenRequest(BaseModel):
 class SupersetGuestTokenResponse(BaseModel):
     token: str = Field(..., description="Signed Superset guest token")
     superset_dashboard_id: str = Field(..., description="Superset native dashboard UUID/ID to embed")
-    superset_domain: str = Field(..., description="Superset base URL for embedded SDK")
+    superset_domain: str = Field(
+        ..., description="Browser-facing Superset URL for the Embedded SDK"
+    )
     expires_in: int = Field(..., description="Token lifespan in seconds")
     dashboard_title: str
     requires_branch_scope: bool = False

@@ -101,7 +101,10 @@ class Settings(BaseSettings):
     CSRF_HEADER_NAME: str = "X-CSRF-Token"
 
     # Superset Embedded Integration (Optional until integration is configured)
+    # Backend-to-Superset URL. In Docker this is typically host.docker.internal.
     SUPERSET_BASE_URL: str = "http://localhost:8088"
+    # Browser-to-Superset URL used by the Embedded SDK.
+    SUPERSET_BROWSER_URL: str = "http://localhost:8088"
     SUPERSET_ADMIN_USERNAME: Optional[str] = None
     SUPERSET_ADMIN_PASSWORD: Optional[str] = None
     SUPERSET_GUEST_TOKEN_TIMEOUT_SECS: int = 300
