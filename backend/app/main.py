@@ -151,7 +151,7 @@ async def init_default_data() -> None:
                 "title": "Executive Banking Overview",
                 "description": "High-level liquidity, deposit trends, and key performance indicators.",
                 "category": "Executive",
-                "superset_dashboard_id": "placeholder-uuid-executive-overview",
+                "superset_dashboard_id": "7e21e3b5-999a-40d9-b159-d745382a23cf",
                 "roles": ["admin", "executive"],
                 "requires_branch_scope": False,
             },
